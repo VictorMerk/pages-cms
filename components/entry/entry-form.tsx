@@ -199,20 +199,6 @@ const ListField = ({
   }, []);
 
   const handleDragEnd = useCallback((event: any) => {
-    // Note: We use the callback form but we still need fresh data for `arrayMove` and `move`
-    // However, since `dnd-kit` provides `active` and `over` IDs, we can use those.
-    // We rely on `arrayFields` and `fieldValues` from the closure.
-    // This technically means `handleDragEnd` changes every render, breaking memoization of DndContext props if strictly checked.
-    // BUT, the critical part is that ListField render shouldn't cause *all children* to re-render.
-    // We achieve this by memoizing SortableListFieldItem.
-    // `DndContext` changing props isn't the main perf bottleneck, it's the recursive rendering of 100s of fields.
-
-    // To properly fix handleDragEnd to be stable would require `useEvent` pattern or refs for values, 
-    // but simply memoizing the `SortableListFieldItem` is the 80/20 win here.
-
-    // We will keep it inline/simple but wrap in useCallback with deps to show intent, 
-    // even if deps change often.
-
     const { active, over } = event;
     if (active.id !== over.id) {
       const oldIndex = arrayFields.findIndex(item => item.id === active.id);
