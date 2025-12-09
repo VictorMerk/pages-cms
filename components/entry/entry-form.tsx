@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useRef, forwardRef, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useRef, forwardRef, useCallback } from "react";
 import Link from "next/link";
 import {
   useForm,
@@ -96,7 +96,7 @@ const SortableItem = ({
     transform: CSS.Translate.toString(transform),
     transition
   };
-  
+
   return (
     <div ref={setNodeRef} className={cn("flex gap-x-2 items-center", isDragging ? "opacity-50 z-50" : "z-10")} style={style}>
       <Button type="button" variant="ghost" size="icon-sm" className="h-auto w-5 bg-muted/50 self-stretch rounded-md text-muted-foreground cursor-move" {...attributes} {...listeners}>
@@ -106,6 +106,55 @@ const SortableItem = ({
     </div>
   );
 };
+
+interface SortableListFieldItemProps {
+  id: string;
+  field: Field;
+  index: number;
+  fieldName: string;
+  isOpen: boolean;
+  onToggleOpen: (index: number) => void;
+  onRemove: (index: number) => void;
+  renderFields: Function;
+}
+
+const SortableListFieldItem = React.memo(({
+  id,
+  field,
+  index,
+  fieldName,
+  isOpen,
+  onToggleOpen,
+  onRemove,
+  renderFields
+}: SortableListFieldItemProps) => {
+  return (
+    <SortableItem id={id} type={field.type}>
+      <div className="grid gap-6 flex-1">
+        <SingleField
+          field={field}
+          fieldName={`${fieldName}.${index}`}
+          renderFields={renderFields}
+          showLabel={false}
+          isOpen={isOpen}
+          toggleOpen={() => onToggleOpen(index)}
+          index={index}
+        />
+      </div>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button type="button" variant="ghost" size="icon" className="bg-muted/50 text-muted-foreground self-start" onClick={() => onRemove(index)}>
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+          Remove item
+        </TooltipContent>
+      </Tooltip>
+    </SortableItem>
+  );
+});
+SortableListFieldItem.displayName = "SortableListFieldItem";
 
 const ListField = ({
   field,
@@ -117,17 +166,17 @@ const ListField = ({
   renderFields: Function;
 }) => {
   const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
-  
+
   const { setValue, watch } = useFormContext();
   const { fields: arrayFields, append, remove, move } = useFieldArray({
     name: fieldName,
   });
   const fieldValues = watch(fieldName);
-  
+
   // Use an index-to-state map with a ref to survive re-renders
   const openStatesRef = useRef<boolean[]>([]);
   const [, forceUpdate] = useState({});
-  
+
   useEffect(() => {
     if (openStatesRef.current.length === 0 && arrayFields.length > 0) {
       const defaultCollapsed =
@@ -136,58 +185,72 @@ const ListField = ({
         field.list.collapsible &&
         typeof field.list.collapsible === 'object' &&
         field.list.collapsible.collapsed;
-      
+
       openStatesRef.current = Array(arrayFields.length).fill(!defaultCollapsed);
       forceUpdate({});
     }
   }, [arrayFields.length, field.list]);
-  
-  const toggleOpen = (index: number) => {
+
+  const toggleOpen = useCallback((index: number) => {
     if (index >= 0 && index < openStatesRef.current.length) {
       openStatesRef.current[index] = !openStatesRef.current[index];
       forceUpdate({});
     }
-  };
+  }, []);
 
-  const handleDragEnd = (event: any) => {
+  const handleDragEnd = useCallback((event: any) => {
+    // Note: We use the callback form but we still need fresh data for `arrayMove` and `move`
+    // However, since `dnd-kit` provides `active` and `over` IDs, we can use those.
+    // We rely on `arrayFields` and `fieldValues` from the closure.
+    // This technically means `handleDragEnd` changes every render, breaking memoization of DndContext props if strictly checked.
+    // BUT, the critical part is that ListField render shouldn't cause *all children* to re-render.
+    // We achieve this by memoizing SortableListFieldItem.
+    // `DndContext` changing props isn't the main perf bottleneck, it's the recursive rendering of 100s of fields.
+
+    // To properly fix handleDragEnd to be stable would require `useEvent` pattern or refs for values, 
+    // but simply memoizing the `SortableListFieldItem` is the 80/20 win here.
+
+    // We will keep it inline/simple but wrap in useCallback with deps to show intent, 
+    // even if deps change often.
+
     const { active, over } = event;
     if (active.id !== over.id) {
       const oldIndex = arrayFields.findIndex(item => item.id === active.id);
       const newIndex = arrayFields.findIndex(item => item.id === over.id);
-      
+
       // Reorder the open states array the same way as the items
       const newOpenStates = [...openStatesRef.current];
       const [movedState] = newOpenStates.splice(oldIndex, 1);
       newOpenStates.splice(newIndex, 0, movedState);
       openStatesRef.current = newOpenStates;
-      
+
       // Perform the move
       move(oldIndex, newIndex);
-      
+
       // Update form values
       const updatedValues = arrayMove(fieldValues, oldIndex, newIndex);
       setValue(fieldName, updatedValues);
-      
+
       // Force update to reflect the reordered open states
       forceUpdate({});
     }
-  };
+  }, [arrayFields, fieldValues, move, setValue, fieldName]);
 
-  const addItem = () => {
+  const addItem = useCallback(() => {
     append(field.type === 'object'
       ? initializeState(field.fields, {})
       : getDefaultValue(field)
     );
     openStatesRef.current.push(true);
     forceUpdate({});
-  };
+  }, [append, field]);
 
-  const removeItem = (index: number) => {
+  const removeItem = useCallback((index: number) => {
     remove(index);
     openStatesRef.current.splice(index, 1);
     forceUpdate({});
-  };
-  
+  }, [remove]);
+
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
@@ -197,10 +260,10 @@ const ListField = ({
 
   const modifiers = [restrictToVerticalAxis, restrictToParentElement]
 
-  const toggleAll = (collapsed: boolean) => {
+  const toggleAll = useCallback((collapsed: boolean) => {
     openStatesRef.current = Array(openStatesRef.current.length).fill(!collapsed);
     forceUpdate({});
-  };
+  }, []);
 
   // We don't render <FormMessage/> in ListField, because it's already rendered in the individual fields
   return (
@@ -211,13 +274,13 @@ const ListField = ({
           <div className="flex items-center h-5 gap-x-2">
             {field.label !== false &&
               <FormLabel className="text-sm font-medium">
-                {field.label || field.name}   
+                {field.label || field.name}
               </FormLabel>
             }
             {field.required && (
               <span className="inline-flex items-center rounded-full bg-muted border px-2 h-5 text-xs font-medium">Required</span>
             )}
-            
+
             {
               isCollapsible && arrayFields.length > 0 && (
                 <DropdownMenu>
@@ -227,7 +290,7 @@ const ListField = ({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent>
-                  <DropdownMenuItem onClick={() => toggleAll(true)}>
+                    <DropdownMenuItem onClick={() => toggleAll(true)}>
                       Collapse all
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => toggleAll(false)}>
@@ -242,44 +305,32 @@ const ListField = ({
             <DndContext sensors={sensors} modifiers={modifiers} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
               <SortableContext items={arrayFields.map(item => item.id)} strategy={verticalListSortingStrategy}>
                 {arrayFields.map((arrayField, index) => (
-                  <SortableItem key={arrayField.id} id={arrayField.id} type={field.type}>
-                    <div className="grid gap-6 flex-1">
-                      <SingleField
-                        field={field}
-                        fieldName={`${fieldName}.${index}`}
-                        renderFields={renderFields}
-                        showLabel={false}
-                        isOpen={openStatesRef.current[index]}
-                        toggleOpen={() => toggleOpen(index)}
-                        index={index}
-                      />
-                    </div>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button type="button" variant="ghost" size="icon" className="bg-muted/50 text-muted-foreground self-start" onClick={() => removeItem(index)}>
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Remove item
-                      </TooltipContent>
-                    </Tooltip>
-                  </SortableItem>
+                  <SortableListFieldItem
+                    key={arrayField.id}
+                    id={arrayField.id}
+                    field={field}
+                    index={index}
+                    fieldName={fieldName}
+                    isOpen={openStatesRef.current[index]}
+                    onToggleOpen={toggleOpen}
+                    onRemove={removeItem}
+                    renderFields={renderFields}
+                  />
                 ))}
               </SortableContext>
             </DndContext>
             {typeof field.list === 'object' && field.list?.max && arrayFields.length >= field.list.max
               ? null
               : <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={addItem}
-                  className="gap-x-2"
-                >
-                  <Plus className="h-4 w-4" />
-                  Add an item
-                </Button>
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addItem}
+                className="gap-x-2"
+              >
+                <Plus className="h-4 w-4" />
+                Add an item
+              </Button>
             }
             <FormMessage />
           </div>
@@ -289,13 +340,13 @@ const ListField = ({
   );
 };
 
-const BlocksField = forwardRef((props: any, ref) => {
+const BlocksField = React.memo(forwardRef((props: any, ref) => {
   const { field, fieldName, renderFields, isOpen, onToggleOpen, index } = props;
 
   const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
-  
+
   const { setValue, watch, formState: { errors } } = useFormContext();
-  
+
   const value = watch(fieldName);
   const onChange = (val: any) => {
     setValue(fieldName, val, { shouldDirty: true });
@@ -335,11 +386,11 @@ const BlocksField = forwardRef((props: any, ref) => {
     index: index !== undefined ? `${index + 1}` : '',
     fields: fieldValues,
   }
-  const itemLabel = 
-    typeof field.list === 'object' && 
-    field.list.collapsible && 
-    typeof field.list.collapsible === 'object' && 
-    field.list.collapsible.summary
+  const itemLabel =
+    typeof field.list === 'object' &&
+      field.list.collapsible &&
+      typeof field.list.collapsible === 'object' &&
+      field.list.collapsible.summary
       ? interpolate(field.list.collapsible.summary, interpolateData)
       : `Item ${index !== undefined ? `#${index + 1}` : ''}`;
 
@@ -370,8 +421,8 @@ const BlocksField = forwardRef((props: any, ref) => {
         <div className="border rounded-lg">
           <header
             className={cn(
-              "flex items-center gap-x-2 px-4 h-10 text-sm font-medium transition-colors rounded-t-lg", 
-              isOpen ? 'border-b' : 'rounded-b-lg', 
+              "flex items-center gap-x-2 px-4 h-10 text-sm font-medium transition-colors rounded-t-lg",
+              isOpen ? 'border-b' : 'rounded-b-lg',
               isCollapsible ? 'cursor-pointer hover:bg-muted' : ''
             )}
             onClick={isCollapsible ? onToggleOpen : undefined}
@@ -384,7 +435,7 @@ const BlocksField = forwardRef((props: any, ref) => {
             )}
             <div className="inline-flex items-center gap-x-0.5 text-muted-foreground">
               <span className={hasErrors() ? 'text-red-500' : ''}>{selectedBlockDefinition.label || selectedBlockDefinition.name}</span>
-              
+
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" type="button" size="icon-xs" className="text-muted-foreground hover:text-foreground bg-transparent">
@@ -421,13 +472,13 @@ const BlocksField = forwardRef((props: any, ref) => {
       )}
     </div>
   );
-});
+}));
 
 BlocksField.displayName = 'BlocksField';
 
-const ObjectField = forwardRef((props: any, ref) => {
-  const { field, fieldName, renderFields, isOpen = true, onToggleOpen = () => {}, index } = props;
-  
+const ObjectField = React.memo(forwardRef((props: any, ref) => {
+  const { field, fieldName, renderFields, isOpen = true, onToggleOpen = () => { }, index } = props;
+
   const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
 
   const { watch, formState: { errors } } = useFormContext();
@@ -442,14 +493,14 @@ const ObjectField = forwardRef((props: any, ref) => {
     index: index !== undefined ? `${index + 1}` : '',
     fields: fieldValues,
   }
-  const itemLabel = 
-    typeof field.list === 'object' && 
-    field.list.collapsible && 
-    typeof field.list.collapsible === 'object' && 
-    field.list.collapsible.summary
+  const itemLabel =
+    typeof field.list === 'object' &&
+      field.list.collapsible &&
+      typeof field.list.collapsible === 'object' &&
+      field.list.collapsible.summary
       ? interpolate(field.list.collapsible.summary, interpolateData)
       : `Item ${index !== undefined ? `#${index + 1}` : ''}`;
-  
+
   return (
     <div className="border rounded-lg">
       {isCollapsible && (
@@ -463,17 +514,17 @@ const ObjectField = forwardRef((props: any, ref) => {
       </div>
     </div>
   );
-});
+}));
 
 ObjectField.displayName = 'ObjectField';
 
-const SingleField = ({
+const SingleField = React.memo(({
   field,
   fieldName,
   renderFields,
   showLabel = true,
   isOpen = true,
-  toggleOpen = () => {},
+  toggleOpen = () => { },
   index = 0
 }: {
   field: Field;
@@ -485,7 +536,7 @@ const SingleField = ({
   index?: number;
 }) => {
   const { control, formState: { errors } } = useFormContext();
-  
+
   let FieldComponent;
 
   const isCollapsible = !!(field.list && !(typeof field.list === 'object' && field.list?.collapsible === false));
@@ -508,7 +559,7 @@ const SingleField = ({
       fieldComponentProps = { ...fieldComponentProps, onToggleOpen: toggleOpen, index };
     }
   }
-  
+
   if (['object', 'block'].includes(field.type)) {
     const hasErrors = () => {
       let curr: any = errors;
@@ -550,7 +601,7 @@ const SingleField = ({
               {showLabel && field.required && <span className="inline-flex items-center rounded-full bg-muted border px-2 h-5 text-xs font-medium">Required</span>}
             </div>
             <FormControl>
-              <FieldComponent 
+              <FieldComponent
                 {...rhfManagedFieldProps}
                 {...fieldComponentProps}
               />
@@ -562,7 +613,7 @@ const SingleField = ({
       />
     );
   }
-};
+});
 
 SingleField.displayName = 'SingleField';
 
@@ -652,7 +703,7 @@ const EntryForm = ({
 
               <h1 className="font-semibold text-lg md:text-2xl truncate">{title}</h1>
             </header>
-            
+
             <div onSubmit={form.handleSubmit(handleSubmit)} className="grid items-start gap-6">
               {filePath &&
                 <div className="space-y-2 overflow-hidden">
